@@ -40,7 +40,7 @@ After playing, your data is saved to:
 WoW/WTF/Account/[YOUR_ACCOUNT]/SavedVariables/EpochDB.lua
 ```
 
-1. Open the website (`index.html`)
+1. Open the website (`https://epochdb-api.onrender.com/`)
 2. Click **⬆ Upload Data** in the top-right
 3. Browse to and select your `EpochDB.lua` file
 4. Click **Submit to Database**
@@ -51,7 +51,7 @@ Your data merges with the community database. Kills, loot, and quests you record
 
 ## 🌐 Website
 
-The `index.html` file is a standalone single-page app. No server required for browsing — just open it in any browser.
+The `https://epochdb-api.onrender.com/` file is a standalone single-page app. No server required for browsing — just open it in any browser.
 
 ### Sections
 - **Kills** — ranked creature kill counts, filterable by type and zone
