@@ -1,0 +1,8 @@
+## Interface: 30300
+## Title: |cFFc8a84bEpoch|r|cFFFFFFFFDB|r
+## Notes: Community data collector — tracks kills, items, quests, and loot for the Project Epoch database.
+## Author: EpochDB Community
+## Version: 1.2.0
+## SavedVariables: EpochDBData
+
+EpochDB.lua
