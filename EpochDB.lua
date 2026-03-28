@@ -377,7 +377,7 @@ local function scanContainer(bag)
         if link then
             local itemID = link:match("item:(%d+)")
             if itemID and not EpochDBData.items[itemID] then
-                local name, _, quality, ilvl, _, iType, iSubType, _, iSlot =
+                local name, _, quality, ilvl, _, iType, iSubType, _, iSlot, icon =
                     GetItemInfo(link)
                 if name then
                     EpochDBData.items[itemID] = {
@@ -388,6 +388,7 @@ local function scanContainer(bag)
                         type    = iType or "",
                         subType = iSubType or "",
                         slot    = iSlot or "",
+                        icon    = icon or "",
                         extras  = getItemExtras(link),
                     }
                 end
@@ -421,7 +422,7 @@ local function scanEquipped()
         if link then
             local itemID = link:match("item:(%d+)")
             if itemID and not EpochDBData.items[itemID] then
-                local name, _, quality, ilvl, _, iType, iSubType, _, iSlot =
+                local name, _, quality, ilvl, _, iType, iSubType, _, iSlot, icon =
                     GetItemInfo(link)
                 if name then
                     EpochDBData.items[itemID] = {
@@ -432,6 +433,7 @@ local function scanEquipped()
                         type    = iType or "",
                         subType = iSubType or "",
                         slot    = iSlot or "",
+                        icon    = icon or "",
                         extras  = getItemExtras(link),
                     }
                 end
@@ -440,7 +442,7 @@ local function scanEquipped()
     end
 end
 
-local function scanGuildBank()
+local function scanGuildBank
     if not EpochDBData or not EpochDBData.items then return end
     if not GetNumGuildBankTabs then return end
     local numTabs = GetNumGuildBankTabs()
@@ -451,7 +453,7 @@ local function scanGuildBank()
             if link then
                 local itemID = link:match("item:(%d+)")
                 if itemID and not EpochDBData.items[itemID] then
-                    local name, _, quality, ilvl, _, iType, iSubType, _, iSlot =
+                    local name, _, quality, ilvl, _, iType, iSubType, _, iSlot, icon =
                         GetItemInfo(link)
                     if name then
                         EpochDBData.items[itemID] = {
@@ -462,6 +464,7 @@ local function scanGuildBank()
                             type    = iType or "",
                             subType = iSubType or "",
                             slot    = iSlot or "",
+                            icon    = icon or "",
                             extras  = getItemExtras(link),
                         }
                     end
@@ -471,7 +474,7 @@ local function scanGuildBank()
     end
 end
 
-local function scheduleBagScan()
+local function scheduleBagScan
     if EpochDB._bagScanPending then return end
     EpochDB._bagScanPending = true
     local elapsed = 0
@@ -490,6 +493,24 @@ end
 
 -- ── QUEST TRACKING ───────────────────────────────────────────
 
+local function resolveQuestID(title)
+    -- Try GetQuestID() first (available on some servers / later clients)
+    if GetQuestID then
+        local id = GetQuestID()
+        if id and id > 0 then return id end
+    end
+    -- Fallback: scan quest log for a matching title
+    if GetNumQuestLogEntries then
+        for i = 1, GetNumQuestLogEntries() do
+            local t, _, _, _, isHeader, _, _, _, questID = GetQuestLogTitle(i)
+            if not isHeader and t == title and questID and questID > 0 then
+                return questID
+            end
+        end
+    end
+    return nil
+end
+
 local function getOrCreateQuest(title)
     if not title or title == "" then return nil end
     local zone = getZone()
@@ -504,7 +525,12 @@ local function getOrCreateQuest(title)
             rewards     = {},
         }
     end
-    return EpochDBData.quests[title]
+
+    local q = EpochDBData.quests[title]
+    if not q.questID then
+        q.questID = resolveQuestID(title)
+    end
+    return q
 end
 
 local function handleQuestDetail()
@@ -614,6 +640,7 @@ local function buildItemEntry(link, nameFromLoot, qtyFromLoot, qualityFromLoot)
         name     = name or nameFromLoot,
         qty      = qtyFromLoot or 1,
         quality  = quality or qualityFromLoot,
+        icon     = icon or "",
         info     = {
             itemLevel = itemLevel,
             reqLevel  = reqLevel,
