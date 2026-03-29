@@ -442,7 +442,7 @@ local function scanEquipped()
     end
 end
 
-local function scanGuildBank
+local function scanGuildBank()
     if not EpochDBData or not EpochDBData.items then return end
     if not GetNumGuildBankTabs then return end
     local numTabs = GetNumGuildBankTabs()
@@ -474,7 +474,7 @@ local function scanGuildBank
     end
 end
 
-local function scheduleBagScan
+local function scheduleBagScan()
     if EpochDB._bagScanPending then return end
     EpochDB._bagScanPending = true
     local elapsed = 0
