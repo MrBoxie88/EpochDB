@@ -196,7 +196,7 @@ local function handleLootOpened()
     local currentCoords = getCoords()
     local numItems = GetNumLootItems()
     for slot = 1, numItems do
-        local _, itemName, _, _, quality = GetLootSlotInfo(slot)
+        local icon, itemName, _, quality = GetLootSlotInfo(slot)
         local link = GetLootSlotLink(slot)
 
         if link then
@@ -207,6 +207,7 @@ local function handleLootOpened()
                         id      = itemID,
                         name    = itemName,
                         quality = quality or 1,
+                        icon    = icon or "",
                         count   = 0,
                         sources = {},
                     }
@@ -493,18 +494,28 @@ end
 
 -- ── QUEST TRACKING ───────────────────────────────────────────
 
+local QUEST_TITLE_BLOCKLIST = {
+    ["reward"]  = true,
+    ["rewards"] = true,
+    ["gossip"]  = true,
+    ["unknown"] = true,
+}
+
 local function resolveQuestID(title)
     -- Try GetQuestID() first (available on some servers / later clients)
     if GetQuestID then
-        local id = GetQuestID()
+        local id = tonumber(GetQuestID())
         if id and id > 0 then return id end
     end
-    -- Fallback: scan quest log for a matching title
+    -- Fallback: scan quest log for a matching title.
+    -- In 3.3.5 GetQuestLogTitle returns: title, level, tag, isHeader, isCollapsed, isComplete, isDaily
+    -- Some servers append questID at position 8 or 9.
     if GetNumQuestLogEntries then
         for i = 1, GetNumQuestLogEntries() do
-            local t, _, _, _, isHeader, _, _, _, questID = GetQuestLogTitle(i)
-            if not isHeader and t == title and questID and questID > 0 then
-                return questID
+            local t, _, _, isHeader, _, _, _, _, questID = GetQuestLogTitle(i)
+            if not isHeader and t == title then
+                local id = tonumber(questID)
+                if id and id > 0 then return id end
             end
         end
     end
@@ -513,6 +524,7 @@ end
 
 local function getOrCreateQuest(title)
     if not title or title == "" then return nil end
+    if QUEST_TITLE_BLOCKLIST[title:lower()] then return nil end
     local zone = getZone()
     if not zone then return nil end
 
