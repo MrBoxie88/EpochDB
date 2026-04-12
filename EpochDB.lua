@@ -674,13 +674,17 @@ local function captureVendor()
     local count = GetMerchantNumItems()
     if not count or count <= 0 then return end
 
-    -- Identify the vendor
+    -- Identify the vendor: prefer target, fall back to mouseover 
     local vendorGUID = UnitGUID and UnitGUID("target") or nil
     local vendorName = UnitName and UnitName("target") or nil
-    local vendorId   = vendorGUID and GetEntryIdFromGUID(vendorGUID) or nil
+    if (not vendorGUID or not vendorName) and UnitExists and UnitExists("mouseover") then
+        vendorGUID = vendorGUID or (UnitGUID and UnitGUID("mouseover"))
+        vendorName = vendorName or (UnitName and UnitName("mouseover"))
+    end
+    local vendorId = vendorGUID and GetEntryIdFromGUID(vendorGUID) or nil
 
-    -- Collect items
-    local items, itemIds = {}, {}
+    -- Collect items; seen guards against vendors with duplicate item slots
+    local items, itemIds, seen = {}, {}, {}
     for index = 1, count do
         local link = GetMerchantItemLink and GetMerchantItemLink(index) or nil
         local name, _, price, quantity, numAvailable, _, extendedCost = GetMerchantItemInfo(index)
@@ -692,7 +696,10 @@ local function captureVendor()
             entry.numAvailable   = numAvailable
             entry.extendedCost   = extendedCost
             items[#items + 1]    = entry
-            itemIds[#itemIds + 1] = iid
+            if not seen[iid] then
+                seen[iid] = true
+                itemIds[#itemIds + 1] = iid
+            end
         end
     end
     if #items == 0 then return end
