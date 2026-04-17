@@ -501,22 +501,28 @@ local QUEST_TITLE_BLOCKLIST = {
     ["unknown"] = true,
 }
 
-local function resolveQuestID(title)
-    -- Try GetQuestID() first (available on some servers / later clients)
-    if GetQuestID then
-        local id = tonumber(GetQuestID())
-        if id and id > 0 then return id end
-    end
-    -- Fallback: scan quest log for a matching title.
-    -- In 3.3.5 GetQuestLogTitle returns: title, level, tag, isHeader, isCollapsed, isComplete, isDaily
-    -- Some servers append questID at position 8 or 9.
-    if GetNumQuestLogEntries then
-        for i = 1, GetNumQuestLogEntries() do
-            local t, _, _, isHeader, _, _, _, _, questID = GetQuestLogTitle(i)
-            if not isHeader and t == title then
-                local id = tonumber(questID)
-                if id and id > 0 then return id end
-            end
+-- Parse the numeric quest ID out of a quest hyperlink ("|Hquest:12345:...|h").
+-- This is the reliable 3.3.5 method used by EpochHead.
+local function QuestIDFromLink(link)
+    local id = tostring(link or ""):match("Hquest:(%d+)")
+    return id and tonumber(id) or nil
+end
+
+-- GetQuestLink(logIndex) returns a hyperlink for the quest at that log position.
+local function GetQuestIdFromLogIndex(idx)
+    if not idx or not GetQuestLink then return nil end
+    return QuestIDFromLink(GetQuestLink(idx))
+end
+
+-- Walk the quest log looking for a matching title, then pull the ID via the link.
+local function FindQuestIDByTitle(title)
+    if not title or title == "" or not GetNumQuestLogEntries then return nil end
+    local target = title:lower()
+    for i = 1, GetNumQuestLogEntries() do
+        local qTitle, _, _, isHeader = GetQuestLogTitle(i)
+        if not isHeader and qTitle and qTitle:lower() == target then
+            local id = GetQuestIdFromLogIndex(i)
+            if id then return id end
         end
     end
     return nil
@@ -540,9 +546,67 @@ local function getOrCreateQuest(title)
 
     local q = EpochDBData.quests[title]
     if not q.questID then
-        q.questID = resolveQuestID(title)
+        q.questID = FindQuestIDByTitle(title)
     end
     return q
+end
+
+local _pendingQuestAccept = nil   -- { idx, title, ts } when ID not yet in log
+local _pendingQuestTitle  = nil   -- title saved at QUEST_COMPLETE for QUEST_TURNED_IN
+local _lastTurnedIn       = nil   -- { title, questID, ts } for follow-up chain detection
+
+local function handleQuestAccepted(questIndex, questId)
+    if not EpochDBData or not EpochDBData.quests then return end
+
+    if questIndex and SelectQuestLogEntry then pcall(SelectQuestLogEntry, questIndex) end
+
+    local title
+    if questIndex and GetQuestLogTitle then
+        local ok, t = pcall(function() return ({ GetQuestLogTitle(questIndex) })[1] end)
+        if ok then title = t end
+    end
+    if not title or title == "" then return end
+    if QUEST_TITLE_BLOCKLIST[title:lower()] then return end
+
+    local qid = tonumber(questId) or GetQuestIdFromLogIndex(questIndex) or FindQuestIDByTitle(title)
+
+    local q = getOrCreateQuest(title)
+    if q and qid then q.questID = qid end
+
+    if q and not q.questID then
+        _pendingQuestAccept = { idx = questIndex, title = title, ts = time() }
+    end
+    log("quest accepted: " .. tostring(title) .. " id=" .. tostring(qid))
+end
+
+local function handleQuestLogUpdate()
+    if not _pendingQuestAccept then return end
+    if time() - (_pendingQuestAccept.ts or 0) > 10 then
+        _pendingQuestAccept = nil; return
+    end
+    local qid = GetQuestIdFromLogIndex(_pendingQuestAccept.idx)
+    if qid then
+        local q = EpochDBData.quests and EpochDBData.quests[_pendingQuestAccept.title]
+        if q then q.questID = qid end
+        _pendingQuestAccept = nil
+    end
+end
+
+local function handleQuestTurnedIn(questID, xpReward, moneyReward)
+    if not EpochDBData or not EpochDBData.quests then return end
+    local qid = tonumber(questID)
+    if not qid then _pendingQuestTitle = nil; return end
+
+    if _pendingQuestTitle then
+        local q = EpochDBData.quests[_pendingQuestTitle]
+        if q then
+            if not q.questID then q.questID = qid end
+            if xpReward and xpReward > 0 then q.rewardXP = xpReward end
+        end
+        _lastTurnedIn  = { title = _pendingQuestTitle, questID = qid, ts = time() }
+        _pendingQuestTitle = nil
+    end
+    log("quest turned in: id=" .. tostring(qid) .. " xp=" .. tostring(xpReward))
 end
 
 local function handleQuestDetail()
@@ -553,6 +617,14 @@ local function handleQuestDetail()
     if not q then return end
 
     q.coords = getCoords()
+
+    -- Chain detection: if this quest was offered within 5s of a turn-in, they are linked.
+    if _lastTurnedIn and (time() - (_lastTurnedIn.ts or 0)) < 5 then
+        q.prevQuest = _lastTurnedIn.title
+        local prevQ = EpochDBData.quests[_lastTurnedIn.title]
+        if prevQ then prevQ.nextQuest = title end
+        _lastTurnedIn = nil
+    end
 
     -- Quest body & objective text (only available during QUEST_DETAIL)
     local body = GetQuestText and GetQuestText() or nil
@@ -599,6 +671,7 @@ local function handleQuestComplete()
     local q = getOrCreateQuest(title)
     if not q then return end
 
+    _pendingQuestTitle = title  -- consumed by handleQuestTurnedIn
     q.completions = q.completions + 1
     q.coords = getCoords()
 
@@ -748,6 +821,9 @@ frame:RegisterEvent("LOOT_OPENED")
 frame:RegisterEvent("QUEST_DETAIL")
 frame:RegisterEvent("QUEST_PROGRESS")
 frame:RegisterEvent("QUEST_COMPLETE")
+frame:RegisterEvent("QUEST_ACCEPTED")
+frame:RegisterEvent("QUEST_LOG_UPDATE")
+frame:RegisterEvent("QUEST_TURNED_IN")
 frame:RegisterEvent("BAG_UPDATE_DELAYED")
 frame:RegisterEvent("BANKFRAME_OPENED")
 frame:RegisterEvent("PLAYER_EQUIPMENT_CHANGED")
@@ -781,6 +857,12 @@ frame:SetScript("OnEvent", function(self, event, ...)
             handleQuestProgress()
         elseif event == "QUEST_COMPLETE" then
             handleQuestComplete()
+        elseif event == "QUEST_ACCEPTED" then
+            handleQuestAccepted(args[1], args[2])
+        elseif event == "QUEST_LOG_UPDATE" then
+            handleQuestLogUpdate()
+        elseif event == "QUEST_TURNED_IN" then
+            handleQuestTurnedIn(args[1], args[2], args[3])
         elseif event == "BAG_UPDATE_DELAYED" then
             scheduleBagScan()
         elseif event == "BANKFRAME_OPENED" then
