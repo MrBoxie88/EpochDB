@@ -815,7 +815,19 @@ local function getOrCreateQuest(title)
 
     local q = EpochDBData.quests[title]
     if not q.questID then
-        q.questID = FindQuestIDByTitle(title)
+        local fromFrame = GetQuestID and GetQuestID() or 0
+        q.questID = (fromFrame > 0 and fromFrame) or FindQuestIDByTitle(title)
+    end
+    -- Detect daily via quest log
+    if not q.isDaily and IsQuestDaily then
+        for i = 1, (GetNumQuestLogEntries and GetNumQuestLogEntries() or 0) do
+            local qTitle, _, _, isHeader = GetQuestLogTitle(i)
+            if not isHeader and qTitle and qTitle == title then
+                local ok, v = pcall(IsQuestDaily, i)
+                if ok and v then q.isDaily = true end
+                break
+            end
+        end
     end
     return q
 end
