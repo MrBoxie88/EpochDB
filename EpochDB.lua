@@ -88,6 +88,100 @@ local function snapshotUnit(unit)
     }
 end
 
+-- ── FISHING STATE ────────────────────────────────────────────
+
+local FISHING_SPELL_IDS = { [7732] = true, [7620] = true, [18248] = true }
+
+local _fishingHitTS = nil   -- time() of last confirmed fishing cast
+local _fishingLast  = nil   -- { z, s, x, y } coords at cast time
+
+local function isFishingSpell(spellID, spellName)
+    if spellID and FISHING_SPELL_IDS[spellID] then return true end
+    if spellName then
+        local fishName = GetSpellInfo and GetSpellInfo(7732) or "Fishing"
+        if spellName == fishName then return true end
+    end
+    return false
+end
+
+local function markFishingCast()
+    local z = GetRealZoneText() or ""
+    local s = GetSubZoneText() or ""
+    local x, y = GetPlayerMapPosition("player")
+    _fishingHitTS = time()
+    _fishingLast  = { z = z, s = s, x = x, y = y }
+    log("fishing cast detected @ " .. z .. (s ~= "" and (":" .. s) or ""))
+end
+
+local function isFishingLoot()
+    -- Blizzard API available on 3.3.5 (mirrors EpochHead IsFishingLootSafe)
+    if type(IsFishingLoot) == "function" then
+        local ok, res = pcall(IsFishingLoot)
+        if ok and res then return true end
+    end
+    -- Fallback: recent fishing cast within 12 seconds
+    return _fishingHitTS ~= nil and (time() - _fishingHitTS) <= 12
+end
+
+-- ── GATHER / DISENCHANT STATE ─────────────────────────────────
+
+-- Spell IDs match EpochHead gather.lua
+local MINING_SPELL_IDS    = { [2575]  = true }
+local HERBALISM_SPELL_IDS = { [2366]  = true }
+local SKINNING_SPELL_IDS  = { [8613]  = true }
+local DISENCHANT_SPELL_ID = 13262
+
+-- _lastGatherCast: { kind = "Mining"|"Herbalism"|"Skinning", z,s,x,y, ts }
+-- _lastDisenchant: { sourceItemId, sourceItemName, z,s,x,y, ts }
+local _lastGatherCast  = nil
+local _lastDisenchant  = nil
+
+local GATHER_WINDOWS = { Mining = 12, Herbalism = 12, Skinning = 3 }
+
+local function markGatherCast(kind)
+    local z = GetRealZoneText() or ""
+    local s = GetSubZoneText() or ""
+    local x, y = GetPlayerMapPosition("player")
+    _lastGatherCast = { kind = kind, z = z, s = s, x = x, y = y, ts = time() }
+    log("gather cast: " .. kind .. " @ " .. z)
+end
+
+local function recentGatherCast(kind)
+    if not _lastGatherCast or _lastGatherCast.kind ~= kind then return false end
+    local window = GATHER_WINDOWS[kind] or 12
+    return (time() - (_lastGatherCast.ts or 0)) <= window
+end
+
+local function markDisenchantCast()
+    -- Capture what item is targeted: the item in the cursor / target frame is
+    -- not directly available, so we just note the cast time and location.
+    -- Source item is resolved in handleLootOpened from the loot source GUID.
+    local z = GetRealZoneText() or ""
+    local s = GetSubZoneText() or ""
+    local x, y = GetPlayerMapPosition("player")
+    _lastDisenchant = { z = z, s = s, x = x, y = y, ts = time() }
+    log("disenchant cast @ " .. z)
+end
+
+local function recentDisenchantCast()
+    return _lastDisenchant ~= nil and (time() - (_lastDisenchant.ts or 0)) <= 8
+end
+
+local function isGatheringSpell(spellID, spellName)
+    if spellID then
+        if MINING_SPELL_IDS[spellID]    then return "Mining"    end
+        if HERBALISM_SPELL_IDS[spellID] then return "Herbalism" end
+        if SKINNING_SPELL_IDS[spellID]  then return "Skinning"  end
+    end
+    if spellName then
+        local s = spellName:lower()
+        if s:find("mining",    1, true) then return "Mining"    end
+        if s:find("herb",      1, true) then return "Herbalism" end
+        if s:find("skinning",  1, true) then return "Skinning"  end
+    end
+    return nil
+end
+
 -- ── KILL TRACKING ────────────────────────────────────────────
 
 local KILL_DEDUP_WINDOW = 300
@@ -107,9 +201,29 @@ local function markKill(guid)
 end
 
 local function handleCombatLog(...)
-    if not EpochDBData or not EpochDBData.kills then return end
-
     local timestamp, event, sourceGUID, sourceName, sourceFlags, destGUID, destName, destFlags = ...
+
+    -- Fishing / gather / disenchant cast detection via combat log (backup path)
+    if event == "SPELL_CAST_SUCCESS" then
+        if sourceGUID and UnitGUID and sourceGUID == UnitGUID("player") then
+            local spellId   = select(9,  ...)
+            local spellName = select(10, ...)
+            local sid       = tonumber(spellId)
+            if isFishingSpell(sid, spellName) then
+                markFishingCast()
+            else
+                local gatherKind = isGatheringSpell(sid, spellName)
+                if gatherKind then
+                    markGatherCast(gatherKind)
+                elseif sid == DISENCHANT_SPELL_ID then
+                    markDisenchantCast()
+                end
+            end
+        end
+        return
+    end
+
+    if not EpochDBData or not EpochDBData.kills then return end
 
     if event ~= "UNIT_DIED" and event ~= "PARTY_KILL" then return end
     if not destGUID or not destName or destName == "" then return end
@@ -159,6 +273,25 @@ end
 
 -- ── LOOT TRACKING ────────────────────────────────────────────
 
+-- Primary fishing cast detection: UNIT_SPELLCAST_SUCCEEDED fires reliably
+-- with spell name and ID before the bobber lands (mirrors EpochHead).
+local function handleSpellcastSucceeded(unit, spellName, rank, lineId, spellID)
+    if unit ~= "player" then return end
+    local sid = tonumber(spellID)
+    if isFishingSpell(sid, spellName) then
+        markFishingCast()
+        return
+    end
+    local gatherKind = isGatheringSpell(sid, spellName)
+    if gatherKind then
+        markGatherCast(gatherKind)
+        return
+    end
+    if sid == DISENCHANT_SPELL_ID then
+        markDisenchantCast()
+    end
+end
+
 local function DetectLootSource()
     if not GetLootSourceInfo then return nil, nil end
     local num = GetNumLootItems() or 0
@@ -182,7 +315,143 @@ local function DetectLootSource()
 end
 
 local function handleLootOpened()
-    if not EpochDBData or not EpochDBData.loot then return end
+    if not EpochDBData then return end
+
+    -- ── Fishing branch (mirrors EpochHead OnLootOpened fishing path) ──
+    if isFishingLoot() then
+        if not EpochDBData.fishing then return end
+        local z = (_fishingLast and _fishingLast.z) or getZone() or ""
+        local s = (_fishingLast and _fishingLast.s) or getSubZone() or ""
+        local x = (_fishingLast and _fishingLast.x) or select(1, GetPlayerMapPosition("player"))
+        local y = (_fishingLast and _fishingLast.y) or select(2, GetPlayerMapPosition("player"))
+        local zoneKey = z .. (s ~= "" and (":" .. s) or "")
+        local numItems = GetNumLootItems() or 0
+        for slot = 1, numItems do
+            local link = GetLootSlotLink(slot)
+            if link and link:find("item:") then
+                local icon, itemName, qty, quality = GetLootSlotInfo(slot)
+                local itemID = link:match("item:(%d+)")
+                if itemID and itemName and itemName ~= "" then
+                    if not EpochDBData.fishing[itemID] then
+                        EpochDBData.fishing[itemID] = {
+                            id      = itemID,
+                            name    = itemName,
+                            quality = quality or 1,
+                            icon    = icon or "",
+                            count   = 0,
+                            zones   = {},
+                        }
+                    end
+                    local entry = EpochDBData.fishing[itemID]
+                    entry.count = entry.count + 1
+                    if zoneKey ~= "" then
+                        entry.zones[zoneKey] = (entry.zones[zoneKey] or 0) + 1
+                    end
+                end
+            end
+        end
+        _fishingHitTS = nil  -- consume the cast timestamp
+        log("fishing loot recorded zone=" .. zoneKey)
+        return
+    end
+
+    -- ── Gather branch (Mining / Herbalism / Skinning) ──
+    local activeGather = nil
+    if recentGatherCast("Mining")    then activeGather = "Mining"    end
+    if recentGatherCast("Herbalism") then activeGather = "Herbalism" end
+    if recentGatherCast("Skinning")  then activeGather = "Skinning"  end
+
+    if activeGather then
+        if not EpochDBData.gathering then return end
+        local gc   = _lastGatherCast
+        local z    = (gc and gc.z) or getZone() or ""
+        local s    = (gc and gc.s) or getSubZone() or ""
+        local zoneKey = z .. (s ~= "" and (":" .. s) or "")
+        -- Try to get the node name from the loot frame title
+        local nodeName = (_G.LootFrameTitleText and _G.LootFrameTitleText.GetText
+            and _G.LootFrameTitleText:GetText()) or nil
+        if not nodeName or nodeName == "" then nodeName = nil end
+        local numItems = GetNumLootItems() or 0
+        for slot = 1, numItems do
+            local link = GetLootSlotLink(slot)
+            if link and link:find("item:") then
+                local icon, itemName, qty, quality = GetLootSlotInfo(slot)
+                local itemID = link:match("item:(%d+)")
+                if itemID and itemName and itemName ~= "" then
+                    if not EpochDBData.gathering[itemID] then
+                        EpochDBData.gathering[itemID] = {
+                            id        = itemID,
+                            name      = itemName,
+                            quality   = quality or 1,
+                            icon      = icon or "",
+                            source    = activeGather,
+                            count     = 0,
+                            zones     = {},
+                            nodes     = {},
+                        }
+                    end
+                    local entry = EpochDBData.gathering[itemID]
+                    entry.count = entry.count + 1
+                    if zoneKey ~= "" then
+                        entry.zones[zoneKey] = (entry.zones[zoneKey] or 0) + 1
+                    end
+                    if nodeName then
+                        entry.nodes[nodeName] = (entry.nodes[nodeName] or 0) + 1
+                    end
+                end
+            end
+        end
+        _lastGatherCast = nil  -- consume
+        log("gather loot recorded: " .. activeGather .. " zone=" .. zoneKey)
+        return
+    end
+
+    -- ── Disenchant branch ──
+    if recentDisenchantCast() then
+        if not EpochDBData.disenchanting then return end
+        local dc   = _lastDisenchant
+        local z    = (dc and dc.z) or getZone() or ""
+        local s    = (dc and dc.s) or getSubZone() or ""
+        local zoneKey = z .. (s ~= "" and (":" .. s) or "")
+        -- Identify what was disenchanted from the loot source GUID
+        local sourceGUID2, _ = DetectLootSource()
+        local sourceItemName = nil
+        local sourceItemId   = nil
+        if sourceGUID2 then
+            -- The source of disenchant loot is the item itself, encoded in the GUID
+            sourceItemId = GetEntryIdFromGUID(sourceGUID2)
+        end
+        local numItems = GetNumLootItems() or 0
+        for slot = 1, numItems do
+            local link = GetLootSlotLink(slot)
+            if link and link:find("item:") then
+                local icon, itemName, qty, quality = GetLootSlotInfo(slot)
+                local itemID = link:match("item:(%d+)")
+                if itemID and itemName and itemName ~= "" then
+                    if not EpochDBData.disenchanting[itemID] then
+                        EpochDBData.disenchanting[itemID] = {
+                            id      = itemID,
+                            name    = itemName,
+                            quality = quality or 1,
+                            icon    = icon or "",
+                            count   = 0,
+                            zones   = {},
+                        }
+                    end
+                    local entry = EpochDBData.disenchanting[itemID]
+                    entry.count = entry.count + 1
+                    if zoneKey ~= "" then
+                        entry.zones[zoneKey] = (entry.zones[zoneKey] or 0) + 1
+                    end
+                end
+            end
+        end
+        _lastDisenchant = nil  -- consume
+        log("disenchant loot recorded zone=" .. zoneKey)
+        return
+    end
+
+    if not EpochDBData.loot then return end
 
     local sourceGUID, sourceNpcId = DetectLootSource()
     local sourceName = nil
@@ -502,7 +771,7 @@ local QUEST_TITLE_BLOCKLIST = {
 }
 
 -- Parse the numeric quest ID out of a quest hyperlink ("|Hquest:12345:...|h").
--- This is the reliable 3.3.5 method used by EpochHead.
+-- This is the reliable 3.3.5 method.
 local function QuestIDFromLink(link)
     local id = tostring(link or ""):match("Hquest:(%d+)")
     return id and tonumber(id) or nil
@@ -715,11 +984,14 @@ end
 -- ── VENDOR CAPTURE ────────────────────────────────────────────
 
 local lastVendorSnapshot = nil
+local lastVendorMeta     = nil   -- persists vendor identity across MERCHANT_UPDATE
 
 local function buildItemEntry(link, nameFromLoot, qtyFromLoot, qualityFromLoot)
     local name, _, quality, itemLevel, reqLevel, className, subClassName,
           maxStack, equipLoc, icon, sellPrice = GetItemInfo(link or "")
     local itemID = link and tonumber(tostring(link):match("item:(%d+)")) or nil
+    -- If GetItemInfo had nothing in cache, still keep the entry with what we have
+    if not name and not itemID then return nil end
     return {
         id       = itemID,
         name     = name or nameFromLoot,
@@ -747,7 +1019,7 @@ local function captureVendor()
     local count = GetMerchantNumItems()
     if not count or count <= 0 then return end
 
-    -- Identify the vendor: prefer target, fall back to mouseover 
+    -- Identify the vendor: prefer target, fall back to mouseover, then cached meta
     local vendorGUID = UnitGUID and UnitGUID("target") or nil
     local vendorName = UnitName and UnitName("target") or nil
     if (not vendorGUID or not vendorName) and UnitExists and UnitExists("mouseover") then
@@ -755,6 +1027,13 @@ local function captureVendor()
         vendorName = vendorName or (UnitName and UnitName("mouseover"))
     end
     local vendorId = vendorGUID and GetEntryIdFromGUID(vendorGUID) or nil
+    -- Persist identity across MERCHANT_UPDATE 
+    local meta = lastVendorMeta or {}
+    if vendorGUID then meta.guid = vendorGUID end
+    if vendorId   then meta.id   = vendorId   end
+    if vendorName then meta.name = vendorName end
+    lastVendorMeta = meta
+    vendorGUID = meta.guid; vendorId = meta.id; vendorName = meta.name
 
     -- Collect items; seen guards against vendors with duplicate item slots
     local items, itemIds, seen = {}, {}, {}
@@ -818,6 +1097,7 @@ frame:RegisterEvent("PLAYER_ENTERING_WORLD")
 frame:RegisterEvent("PLAYER_LOGOUT")
 frame:RegisterEvent("COMBAT_LOG_EVENT_UNFILTERED")
 frame:RegisterEvent("LOOT_OPENED")
+frame:RegisterEvent("UNIT_SPELLCAST_SUCCEEDED")
 frame:RegisterEvent("QUEST_DETAIL")
 frame:RegisterEvent("QUEST_PROGRESS")
 frame:RegisterEvent("QUEST_COMPLETE")
@@ -851,6 +1131,8 @@ frame:SetScript("OnEvent", function(self, event, ...)
             handleCombatLog(unpack(args, 1, n))
         elseif event == "LOOT_OPENED" then
             handleLootOpened()
+        elseif event == "UNIT_SPELLCAST_SUCCEEDED" then
+            handleSpellcastSucceeded(args[1], args[2], args[3], args[4], args[5])
         elseif event == "QUEST_DETAIL" then
             handleQuestDetail()
         elseif event == "QUEST_PROGRESS" then
@@ -879,6 +1161,7 @@ frame:SetScript("OnEvent", function(self, event, ...)
             captureVendor()
         elseif event == "MERCHANT_CLOSED" then
             lastVendorSnapshot = nil
+            lastVendorMeta     = nil
         end
     end)
     if not ok and err then oops(event, err) end
@@ -895,7 +1178,10 @@ function EpochDB:OnLoad()
     EpochDBData.quests  = EpochDBData.quests  or {}
     EpochDBData.loot    = EpochDBData.loot    or {}
     EpochDBData.vendors = EpochDBData.vendors or {}
-    EpochDBData.meta    = EpochDBData.meta    or {}
+    EpochDBData.fishing      = EpochDBData.fishing      or {}
+    EpochDBData.gathering    = EpochDBData.gathering    or {}
+    EpochDBData.disenchanting = EpochDBData.disenchanting or {}
+    EpochDBData.meta         = EpochDBData.meta         or {}
 
     self.session = makeSessionId()
     eprint("v" .. self.version .. " loaded. Use /edb help for commands.")
@@ -982,6 +1268,9 @@ function EpochDB:PrintStats()
     eprint(string.format("Loot Records   : %d", self:Count(EpochDBData.loot)))
     eprint(string.format("Vendors Tracked: %d", self:Count(EpochDBData.vendors or {})))
     eprint(string.format("Quests Tracked : %d", self:Count(EpochDBData.quests or {})))
+    eprint(string.format("Fishing Items  : %d", self:Count(EpochDBData.fishing or {})))
+    eprint(string.format("Gathering Items: %d", self:Count(EpochDBData.gathering or {})))
+    eprint(string.format("Disenchants    : %d", self:Count(EpochDBData.disenchanting or {})))
 end
 
 function EpochDB:Reset()
@@ -991,6 +1280,9 @@ function EpochDB:Reset()
     EpochDBData.quests  = {}
     EpochDBData.loot    = {}
     EpochDBData.vendors = {}
+    EpochDBData.fishing       = {}
+    EpochDBData.gathering     = {}
+    EpochDBData.disenchanting = {}
     resetKillDedup()
     eprint("All data cleared.")
 end
